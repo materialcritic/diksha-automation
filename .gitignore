@@ -1,0 +1,9 @@
+node_modules/
+.local/
+diksha-profile/
+diksha-diagnostic.txt
+diksha-diagnostic.json
+progress.json
+*.log
+.env
+.DS_Store

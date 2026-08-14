@@ -1,0 +1,19 @@
+{
+  "name": "diksha-automation",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Puppeteer automation for DIKSHA course modules",
+  "main": "diksha-progress-monitor.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node diksha-progress-monitor.js",
+    "diagnose": "node diksha-diagnostic.js",
+    "check": "node --check diksha-progress-monitor.js && node --check diksha-diagnostic.js && node --check config.js && node --check lib/log.js && node --check lib/browser.js && node --check lib/dom.js && node --check lib/video.js && node --check lib/progress.js"
+  },
+  "dependencies": {
+    "puppeteer": "^23.11.1"
+  },
+  "license": "MIT"
+}

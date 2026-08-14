@@ -1,183 +1,173 @@
 # DIKSHA Automation
 
-Automated course completion for DIKSHA (Dedicated Channel for Knowledge Sharing At Scale) — an Indian government e-learning platform. This project automates video playback, PDF scrolling, and module progression.
+> **Disclaimer, up front, not buried:** this automates progress through a
+> government training portal (DIKSHA — Dedicated Channel for Knowledge
+> Sharing At Scale). Automating course completion generally violates the
+> platform's terms of service, and on a government training portal the
+> completion record is the whole point of the exercise. The certificate is
+> meant to attest that a person actually engaged with the material. Use only
+> on your own account, understand the risk, and understand that a completion
+> record produced this way may not mean what it's supposed to mean.
 
-## Features
+Puppeteer automation that opens a DIKSHA course, plays each module's video to
+completion, and moves on to the next unvisited module — using a persistent,
+resumable, on-disk progress record.
 
-- **Auto-play Videos** — plays videos muted at 1.5x speed in the background
-- **PDF Handling** — automatically scrolls through PDF content
-- **Auto-advance Modules** — clicks next buttons to progress through course sections
-- **Background Processing** — runs entirely in the browser without manual intervention
-- **Diagnostic Tool** — analyzes page structure for troubleshooting
+## What this actually does (and does not do)
+
+- **Finds and opens module content.** It searches every frame on the course
+  page for a clickable control whose label matches `view`, `start`, `resume`,
+  or `continue` (word-boundary matched, so "Overview"/"Preview" are correctly
+  excluded), and that it hasn't already completed or repeatedly failed.
+- **Plays videos.** Mutes the video, sets its playback rate (default `1.0`,
+  configurable), and waits for it to end — polling actual video state
+  (`ended`, `currentTime`/`duration`, `error`, stalls), not a fixed sleep.
+- **Tracks progress across runs.** Completed and failed module keys are
+  persisted to `.local/progress.json`. Re-running the script skips what's
+  already done.
+- **There is no PDF handling.** Earlier versions of this README described PDF
+  scrolling and generic "Next/Continue" module-advancement buttons; neither
+  of those existed in the code. If the course you're running this against
+  serves PDF readings, they are not currently automated — the script will
+  simply not find a matching control for them and will eventually idle out.
+  If you need this, it would need to be built and validated against the
+  actual PDF viewer markup (run `npm run diagnose` first — see below).
+
+## Why default speed is 1.0x, not faster
+
+Setting `video.playbackRate` client-side is not guaranteed to be honored by
+every player, and many LMS platforms validate progress against wall-clock
+heartbeats rather than `video.currentTime`. If your course doesn't record
+progress, the most likely cause is a mismatch between playback rate and how
+the server validates watch time — try `DIKSHA_SPEED=1.0` (the default) before
+assuming anything else is broken.
 
 ## Prerequisites
 
-- Node.js (v14+)
-- npm
-- Google Chrome
-- DIKSHA account access
+- Node.js 18+
+- Google Chrome (or set `CHROME_PATH` to a Chromium-based browser; falls back
+  to Puppeteer's bundled browser if none is found)
+- A DIKSHA account with access to the target course
 
 ## Installation
 
-1. Clone the repository:
 ```bash
 git clone https://github.com/materialcritic/diksha-automation
-cd diksha-automation
-```
-
-2. Install dependencies:
-```bash
-npm install puppeteer
+cd diksha-automation && npm install
 ```
 
 ## Usage
 
-### Progress Monitor (Main Script)
-
-Automatically completes course content:
+### Run the monitor
 
 ```bash
-node diksha-progress-monitor.js
+cd diksha-automation && npm start
 ```
 
-**What it does:**
-- Navigates to the course URL
-- Detects videos and plays them muted at 1.5x speed
-- Waits for videos to finish
-- Detects PDF content and scrolls through it
-- Clicks "Next" buttons to advance modules
-- Repeats until course completion
+On first run, Chrome opens with a fresh profile at `.local/diksha-profile`
+(gitignored — never committed). If you're not logged in, the script prints a
+prompt and waits up to 5 minutes for you to log in manually in the browser
+window. After that, it proceeds unattended: find content → play/wait →
+record progress → find next content → repeat, until it runs out of new
+content or hits the module budget (`MAX_MODULES`, default 200).
 
-**Console output:**
-- `[VIDEO]` — video detected and playing
-- `[PDF]` — PDF scrolling in progress
-- `[MODULE]` — advancing to next module
-- `[IDLE]` — waiting for content to load
-
-### Diagnostic Tool
-
-Analyzes page structure for debugging:
+### Run the diagnostic
 
 ```bash
-node diksha-diagnostic.js
+cd diksha-automation && npm run diagnose
 ```
 
-**Output:**
-- Saves detailed report to `diksha-diagnostic.txt`
-- Lists all buttons, links, videos, iframes
-- Identifies relevant course controls
-- Shows page text and structure
-- Useful for troubleshooting page changes
+Walks every frame on the course page (not just the main document — DIKSHA's
+video content frequently lives in an iframe) and writes a report to
+`.local/diksha-diagnostic.txt` (human-readable) and
+`.local/diksha-diagnostic.json` (machine-readable). The report includes a
+`MONITOR CANDIDATE MATCHES` section per frame showing exactly which elements
+the monitor's own include/exclude patterns would pick up — use this first
+when the monitor isn't finding something it should. Pass `--keep-open` to
+leave the browser open afterward instead of closing it.
 
 ## Configuration
 
-Edit `diksha-progress-monitor.js` to change:
+All configuration lives in [`config.js`](config.js) and can be overridden
+without editing code:
 
-```javascript
-const COURSE_URL = "https://learning.diksha.gov.in/diksha/course.php?id=...";
+| Env var / flag | Default | Purpose |
+|---|---|---|
+| `--url=<url>` or `DIKSHA_COURSE_URL` | the sample course URL | target course |
+| `DIKSHA_SPEED` | `1.0` | video `playbackRate` |
+| `DIKSHA_PROFILE_DIR` | `.local/diksha-profile` | Chrome profile location |
+| `DIKSHA_LOCAL_DIR` | `.local` | base dir for profile/progress/reports |
+| `CHROME_PATH` | auto-detected | browser executable |
+| `DIKSHA_LOG_LEVEL` | `info` | `debug`\|`info`\|`warn`\|`error` |
+
+Example:
+
+```bash
+DIKSHA_SPEED=1.0 DIKSHA_LOG_LEVEL=debug node diksha-progress-monitor.js --url="https://learning.diksha.gov.in/diksha/course.php?id=..."
 ```
 
-Change the `id`, `section`, and `modeActive` parameters to target different courses.
+## How it works
 
-## How It Works
-
-### Progress Monitor Flow
-
-1. **Detect Content**
-   - Check for video elements
-   - Check for PDF content
-   - Check for "Next" buttons
-
-2. **Handle Videos**
-   - Mute audio
-   - Set playback speed to 1.5x
-   - Auto-play if paused
-   - Wait for completion
-   - Wait 6 seconds for progress recording
-
-3. **Handle PDFs**
-   - Scroll down through content
-   - Count scrolls
-   - Click "next PDF" button when available
-
-4. **Advance Modules**
-   - Find enabled "Next" or "Continue" buttons
-   - Click to move to next module
-   - Reset and repeat
-
-### Diagnostic Tool
-
-Extracts and logs:
-- Page text content
-- All interactive buttons
-- Links and navigation
-- Video elements and metadata
-- iframe containers
-- Elements matching course-related keywords
-- Video/player related elements
+1. **Login check** — detects a login page by URL pattern or the presence of
+   a password field, and waits for you to sign in manually if needed.
+2. **Priming** — scrolls the page once top-to-bottom to trigger lazy-loaded
+   content, then back to the top.
+3. **Main loop**, each iteration:
+   - If a `<video>` element exists on the current page (any frame): mute it,
+     set its rate, play it, poll for real completion (or a stall/error/
+     timeout), wait for an on-page completion marker (falling back to a 6s
+     sleep if none appears), record the module as completed or failed, and
+     navigate back to the course list.
+   - Otherwise, search every frame for the first clickable control that
+     matches the include patterns, doesn't match the exclude patterns, is
+     visible and enabled, and isn't already completed or exhausted its retry
+     budget. Click it (falling back to a dispatched `.click()` if a real
+     mouse click is intercepted by an overlay) and wait for navigation — or
+     for a new tab, if the control opens one.
+   - If nothing is found: return to the course list once, and if a second
+     consecutive pass still finds nothing, the run ends — that's the actual
+     "no more content" signal, not an iteration counter running out.
+4. **Shutdown** — `Ctrl+C`, an unhandled rejection, or an uncaught exception
+   all trigger the same path: save progress to disk, close the browser
+   (5s timeout), exit with a signal-appropriate code.
 
 ## Files
 
-| File | Purpose |
-|------|---------|
-| `diksha-progress-monitor.js` | Main automation script for course completion |
-| `diksha-diagnostic.js` | Diagnostic tool for page analysis |
-| `diksha-profile/` | Chrome user profile (created automatically) |
-| `diksha-diagnostic.txt` | Generated diagnostic report |
-
-## Video Playback Settings
-
-- **Muted** — audio disabled to avoid distraction
-- **Speed** — 1.5x playback rate for faster completion
-- **Autoplay** — automatically starts if paused
-- **Background** — plays while waiting, no interaction needed
+| Path | Purpose |
+|---|---|
+| `diksha-progress-monitor.js` | main automation loop |
+| `diksha-diagnostic.js` | per-frame page structure report |
+| `config.js` | all tunables, env/flag overrides |
+| `lib/browser.js` | launch, login detection, graceful shutdown |
+| `lib/dom.js` | cross-frame element search, click, progress-settle polling |
+| `lib/video.js` | video detection, playback, completion polling |
+| `lib/progress.js` | load/save `.local/progress.json` |
+| `.local/` | gitignored — profile, progress file, diagnostic reports |
 
 ## Troubleshooting
 
-### Script runs but doesn't advance
+**Monitor isn't finding a module it should.** Run `npm run diagnose` and
+check the `MONITOR CANDIDATE MATCHES` section for the relevant frame — it
+shows the exact label text and whether it passed or failed the include/
+exclude patterns. Adjust `INCLUDE_PATTERNS` / `EXCLUDE_PATTERNS` in
+`config.js` accordingly.
 
-1. Run the diagnostic tool:
-```bash
-node diksha-diagnostic.js
-```
+**Video plays but progress never records.** Try `DIKSHA_SPEED=1.0` (see
+above). Also check `.local/diksha-diagnostic.json` for a completion marker
+class/attribute on that module and confirm it matches the selector in
+`waitForProgressSettle()` (`lib/dom.js`).
 
-2. Check the generated `diksha-diagnostic.txt` for:
-   - Button labels and IDs
-   - Video element details
-   - Page structure issues
+**"Profile is locked" on launch.** Another Chrome process is using
+`.local/diksha-profile`. Close all Chrome windows using that profile, or
+delete `.local/diksha-profile/SingletonLock` if you're sure nothing is using
+it.
 
-3. Update control detection patterns if UI elements changed
-
-### Videos not playing
-
-- Check browser console for errors
-- Ensure Chrome has permission to autoplay
-- Verify video is not restricted/blocked
-
-### PDF not scrolling
-
-- Verify PDF is loaded in an accessible container
-- Check if scroll container has `overflow: auto` or `overflow: scroll`
-- Use diagnostic tool to identify PDF element
-
-## Performance
-
-- Videos at 1.5x speed complete ~33% faster
-- PDF scrolling respects page load times
-- 6-second pause after video ensures DIKSHA records progress
-- Idle check every 2 seconds to avoid excessive CPU usage
-
-## Notes
-
-- Browser window stays open for monitoring/debugging
-- Persistent Chrome profile preserves login state
-- Script handles multi-frame pages (iframes)
-- Runs headless-false for visibility during execution
+**Logged out and the script isn't prompting.** It should detect this via URL
+pattern or a password field and print a prompt with a 5-minute wait. If it
+doesn't, that detection likely needs adjusting for this platform — check
+`ensureLoggedIn()` in `lib/browser.js` against what the diagnostic report
+shows for the login page.
 
 ## License
 
 MIT
-
-## Disclaimer
-
-Use only for your own learning accounts. Automated course completion may violate terms of service of some platforms. Use responsibly.
