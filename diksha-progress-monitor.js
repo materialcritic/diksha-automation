@@ -9,12 +9,38 @@ const CHROME_PATH = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrom
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function findViewButton(page) {
+  try {
+    // First try main frame
+    const result = await page.evaluateHandle(() => {
+      const candidates = [...document.querySelectorAll("button, a, [role='button']")];
+      for (const el of candidates) {
+        const text = (el.innerText || el.textContent || "").toLowerCase();
+        if (text.includes("view")) {
+          const rect = el.getBoundingClientRect();
+          const style = getComputedStyle(el);
+          const visible = rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+          const disabled = el.disabled || el.getAttribute("aria-disabled") === "true";
+          if (visible && !disabled) return el;
+        }
+      }
+      return null;
+    });
+
+    const element = result.asElement();
+    if (element) return { frame: page.mainFrame(), element };
+    await result.dispose();
+  } catch (e) {
+    // Ignore
+  }
+
+  // Try iframes as fallback
   for (const frame of page.frames()) {
+    if (frame === page.mainFrame()) continue;
     try {
       const buttons = await frame.$$("button, a");
       for (const btn of buttons) {
-        const text = await frame.evaluate((el) => el.innerText || el.textContent || "").catch(() => "");
-        if (text.toLowerCase().includes("view")) {
+        const text = await frame.evaluate((el) => (el.innerText || el.textContent || "").toLowerCase()).catch(() => "");
+        if (text.includes("view")) {
           const visible = await frame.evaluate((el) => {
             const rect = el.getBoundingClientRect();
             const style = getComputedStyle(el);
@@ -68,15 +94,16 @@ async function goBackIfNeeded(page) {
   try {
     const canGoBack = await page.evaluate(() => window.history.length > 1);
     if (canGoBack) {
+      console.log("[NAV] Going back to module list...");
       await Promise.race([
-        page.goBack({ waitUntil: "domcontentloaded" }),
-        new Promise(resolve => setTimeout(resolve, 5000))
+        page.goBack({ waitUntil: "networkidle0", timeout: 15000 }),
+        new Promise(resolve => setTimeout(resolve, 8000))
       ]).catch(() => {});
-      await delay(1000);
+      await delay(2000);
       return true;
     }
   } catch (e) {
-    // Ignore
+    console.log("[NAV] Could not navigate back:", e.message);
   }
   return false;
 }
@@ -132,26 +159,38 @@ async function goBackIfNeeded(page) {
         continue;
       }
 
+      // Scroll page to ensure all View buttons are visible
+      try {
+        await page.evaluate(() => window.scrollBy(0, 200));
+      } catch (e) {
+        // Ignore scroll errors
+      }
+
       // Look for a "View" button to click
       const viewBtn = await findViewButton(page).catch(() => null);
       if (viewBtn) {
         console.log(`[ATTEMPT ${attemptCount}] Found View button. Clicking...`);
         try {
-          await viewBtn.frame.evaluate((btn) => btn.scrollIntoView()).catch(() => {});
-          await delay(500);
           await viewBtn.element.click();
           console.log("[NAV] Clicked View button. Waiting for content to load...");
-          await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 10000 }).catch(() => {});
+          await delay(2000);
+          await page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 12000 }).catch(() => {});
           await delay(3000);
           continue;
         } catch (e) {
           console.log("[ERROR] Failed to click View button:", e.message);
+          await delay(1000);
         }
       }
 
-      // No video, no view button
-      console.log(`[ATTEMPT ${attemptCount}] Waiting for content...`);
-      await delay(2000);
+      // No video, no view button - scroll and try again
+      console.log(`[ATTEMPT ${attemptCount}] No content found. Scrolling page...`);
+      try {
+        await page.evaluate(() => window.scrollBy(0, 300));
+      } catch (e) {
+        // Ignore
+      }
+      await delay(1500);
 
     } catch (e) {
       console.log(`[ERROR] Attempt ${attemptCount}:`, e.message);
