@@ -115,76 +115,90 @@ async function setupAndPlayVideo(page) {
   let lastContentType = null;
   let pdfScrollCount = 0;
 
+  // Listen for navigation to reset state
+  page.on("navigation", () => {
+    console.log("[NAV] Page navigating. Resetting state...");
+    lastContentType = null;
+    pdfScrollCount = 0;
+  });
+
   while (true) {
-    // Check for video
-    let videoSetup = await setupAndPlayVideo(page);
-    if (videoSetup) {
-      const { frame, handle } = videoSetup;
-      console.log("[VIDEO] Waiting for playback to finish...");
-      try {
-        await frame.waitForFunction(
-          (video) => {
-            const duration = video.duration;
-            return video.ended || (Number.isFinite(duration) && duration > 0 && video.currentTime >= duration - 0.5);
-          },
-          { timeout: 0 },
-          handle
-        );
-      } catch (e) {
-        console.log("Video wait timed out or errored:", e.message);
-      }
-      await handle.dispose();
-      console.log("[VIDEO] Finished. Waiting 6 seconds for progress recording...");
-      await delay(6000);
-      pdfScrollCount = 0;
-      lastContentType = "video";
-      continue;
-    }
-
-    // Check for PDF
-    const pdf = await findPDF(page);
-    if (pdf && lastContentType !== "pdf") {
-      console.log("[PDF] Detected. Starting to scroll through content.");
-      lastContentType = "pdf";
-      pdfScrollCount = 0;
-    }
-
-    if (pdf && lastContentType === "pdf") {
-      const scrolled = await scrollPDF(page);
-      if (scrolled) {
-        pdfScrollCount++;
-        console.log(`[PDF] Scrolled (pass ${pdfScrollCount}). Waiting for next page or module...`);
-        await delay(3000);
-
-        // After several scrolls, try to find next PDF button
-        if (pdfScrollCount > 5) {
-          const nextPdf = await findNextControl(page, "pdf");
-          if (nextPdf) {
-            console.log("[PDF] Next PDF button found. Advancing.");
-            await nextPdf.element.click();
-            await delay(2000);
-            pdfScrollCount = 0;
-            continue;
-          }
+    try {
+      // Check for video
+      let videoSetup = await setupAndPlayVideo(page).catch(() => null);
+      if (videoSetup) {
+        const { frame, handle } = videoSetup;
+        console.log("[VIDEO] Waiting for playback to finish...");
+        try {
+          await frame.waitForFunction(
+            (video) => {
+              const duration = video.duration;
+              return video.ended || (Number.isFinite(duration) && duration > 0 && video.currentTime >= duration - 0.5);
+            },
+            { timeout: 0 },
+            handle
+          );
+        } catch (e) {
+          console.log("Video wait timed out or errored:", e.message);
         }
+        await handle.dispose().catch(() => {});
+        console.log("[VIDEO] Finished. Waiting 6 seconds for progress recording...");
+        await delay(6000);
+        pdfScrollCount = 0;
+        lastContentType = "video";
         continue;
       }
-    }
 
-    // Check for next module/section button
-    const next = await findNextControl(page, "module");
-    if (next) {
-      console.log("[MODULE] Next button enabled. Advancing to next module.");
-      await next.element.click();
+      // Check for PDF
+      const pdf = await findPDF(page).catch(() => null);
+      if (pdf && lastContentType !== "pdf") {
+        console.log("[PDF] Detected. Starting to scroll through content.");
+        lastContentType = "pdf";
+        pdfScrollCount = 0;
+      }
+
+      if (pdf && lastContentType === "pdf") {
+        const scrolled = await scrollPDF(page).catch(() => false);
+        if (scrolled) {
+          pdfScrollCount++;
+          console.log(`[PDF] Scrolled (pass ${pdfScrollCount}). Waiting for next page or module...`);
+          await delay(3000);
+
+          // After several scrolls, try to find next PDF button
+          if (pdfScrollCount > 5) {
+            const nextPdf = await findNextControl(page, "pdf").catch(() => null);
+            if (nextPdf) {
+              console.log("[PDF] Next PDF button found. Advancing.");
+              await nextPdf.element.click().catch(() => {});
+              await delay(2000);
+              pdfScrollCount = 0;
+              continue;
+            }
+          }
+          continue;
+        }
+      }
+
+      // Check for next module/section button
+      const next = await findNextControl(page, "module").catch(() => null);
+      if (next) {
+        console.log("[MODULE] Next button enabled. Advancing to next module.");
+        await next.element.click().catch(() => {});
+        await delay(2000);
+        pdfScrollCount = 0;
+        lastContentType = null;
+        continue;
+      }
+
+      // No video, no PDF, no next button - wait and retry
+      console.log("[IDLE] Waiting for content (video, PDF, or next button)...");
       await delay(2000);
-      pdfScrollCount = 0;
+    } catch (e) {
+      console.log("[ERROR] Caught:", e.message, "- recovering...");
+      await delay(2000);
       lastContentType = null;
-      continue;
+      pdfScrollCount = 0;
     }
-
-    // No video, no PDF, no next button - wait and retry
-    console.log("[IDLE] Waiting for content (video, PDF, or next button)...");
-    await delay(2000);
   }
 })().catch((error) => {
   console.error("Monitor failed:", error);
