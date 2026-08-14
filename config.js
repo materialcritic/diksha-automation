@@ -49,12 +49,17 @@ module.exports = {
   REPORT_TXT: path.join(LOCAL_DIR, "diksha-diagnostic.txt"),
   REPORT_JSON: path.join(LOCAL_DIR, "diksha-diagnostic.json"),
 
-  PLAYBACK_RATE: Number(process.env.DIKSHA_SPEED || 1.0),
+  PLAYBACK_RATE: Number(process.env.DIKSHA_SPEED || 1.5),
 
   LOG_LEVEL: process.env.DIKSHA_LOG_LEVEL || "info",
 
   NAV_TIMEOUT_MS: 30000,
-  SETTLE_MS: 2500,
+  // Opening a video is a same-page modal on this platform (confirmed live:
+  // the URL never changes) — waiting the full NAV_TIMEOUT_MS here just
+  // delays muting the video by up to 30s while it plays unmuted at 1x.
+  // PDFs do navigate, but land well within this window.
+  CLICK_NAV_TIMEOUT_MS: 6000,
+  SETTLE_MS: 1000,
   LOGIN_WAIT_MS: 300000,
   VIDEO_STALL_MS: 60000,
   VIDEO_MAX_MS: 3 * 60 * 60 * 1000,

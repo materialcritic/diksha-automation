@@ -11,13 +11,24 @@ const { loadProgress, saveProgress } = require("./lib/progress");
 
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Opening a video is an in-page modal here — confirmed live, the URL never
+// changes — so waiting on navigation alone means the video plays unmuted at
+// full speed for however long that wait takes. Poll for either a real
+// navigation or the video actually appearing, and stop as soon as either
+// happens, so mute/rate get applied within a few hundred ms instead of after
+// a fixed multi-second timeout.
 async function clickAndSettle(session, frame, element) {
   const before = new Set(await session.browser.pages());
-  const nav = session.page
-    .waitForNavigation({ waitUntil: "domcontentloaded", timeout: cfg.NAV_TIMEOUT_MS })
-    .catch(() => null);
+  const startUrl = session.page.url();
   await clickElement(frame, element);
-  await nav;
+
+  const deadline = Date.now() + cfg.CLICK_NAV_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    if (session.page.url() !== startUrl) break;
+    const video = await findVideo(session.page).catch(() => null);
+    if (video) { await video.handle.dispose().catch(() => {}); break; }
+    await delay(150);
+  }
   await delay(cfg.SETTLE_MS);
 
   const opened = (await session.browser.pages()).find((p) => !before.has(p));
