@@ -13,25 +13,34 @@ Puppeteer automation that opens a DIKSHA course, plays each module's video to
 completion, and moves on to the next unvisited module — using a persistent,
 resumable, on-disk progress record.
 
-## What this actually does (and does not do)
+## What this actually does
 
+- **Recognizes what's already done.** Every module row on the course page
+  carries a real completion signal — DIKSHA's own progress-pie element,
+  `title="N%"`, with a checkmark once it reaches 100%. On startup (and every
+  time it returns to the course list), the script reads this directly from
+  the DOM and treats anything already at 100% as done — so it naturally
+  resumes from the first incomplete, unlocked module instead of restarting
+  from the top. This is independent of (and takes priority over) the on-disk
+  `.local/progress.json` history, which exists mainly to remember modules
+  that failed repeatedly so they aren't retried forever.
 - **Finds and opens module content.** It searches every frame on the course
   page for a clickable control whose label matches `view`, `start`, `resume`,
   or `continue` (word-boundary matched, so "Overview"/"Preview" are correctly
-  excluded), and that it hasn't already completed or repeatedly failed.
+  excluded), skipping anything locked (DIKSHA marks not-yet-available items
+  with a `view-disabled-btn` class rather than a native `disabled` attribute)
+  or already complete per the DOM check above.
 - **Plays videos.** Mutes the video, sets its playback rate (default `1.0`,
   configurable), and waits for it to end — polling actual video state
   (`ended`, `currentTime`/`duration`, `error`, stalls), not a fixed sleep.
+- **Reads PDFs.** DIKSHA serves PDF readings/PPTs through a bundled Mozilla
+  PDF.js viewer. The script detects it, then scrolls through the document in
+  reader-sized steps, polling PDF.js's own page counter and the viewer's
+  scroll position until the last page is reached — again real state, not a
+  fixed sleep or a blind scroll.
 - **Tracks progress across runs.** Completed and failed module keys are
-  persisted to `.local/progress.json`. Re-running the script skips what's
-  already done.
-- **There is no PDF handling.** Earlier versions of this README described PDF
-  scrolling and generic "Next/Continue" module-advancement buttons; neither
-  of those existed in the code. If the course you're running this against
-  serves PDF readings, they are not currently automated — the script will
-  simply not find a matching control for them and will eventually idle out.
-  If you need this, it would need to be built and validated against the
-  actual PDF viewer markup (run `npm run diagnose` first — see below).
+  persisted to `.local/progress.json` as a secondary record; DIKSHA's own DOM
+  state is the primary source of truth for "already done."
 
 ## Why default speed is 1.0x, not faster
 
@@ -114,16 +123,22 @@ DIKSHA_SPEED=1.0 DIKSHA_LOG_LEVEL=debug node diksha-progress-monitor.js --url="h
    content, then back to the top.
 3. **Main loop**, each iteration:
    - If a `<video>` element exists on the current page (any frame): mute it,
-     set its rate, play it, poll for real completion (or a stall/error/
-     timeout), wait for an on-page completion marker (falling back to a 6s
-     sleep if none appears), record the module as completed or failed, and
-     navigate back to the course list.
+     set its rate, play it, and poll for real completion (ended, or a
+     stall/error/timeout).
+   - Else if a PDF.js viewer is open: scroll through it in reader-sized
+     steps, polling the real page counter and scroll position until the last
+     page is reached (or a stall/error/timeout).
+   - After either, return to the course list and re-read the DOM completion
+     signal for that specific module (falling back to a generic on-page
+     marker, then a fixed sleep, if the row isn't found) to decide whether it
+     actually completed.
    - Otherwise, search every frame for the first clickable control that
      matches the include patterns, doesn't match the exclude patterns, is
-     visible and enabled, and isn't already completed or exhausted its retry
-     budget. Click it (falling back to a dispatched `.click()` if a real
-     mouse click is intercepted by an overlay) and wait for navigation — or
-     for a new tab, if the control opens one.
+     visible and enabled, isn't locked, and isn't already complete per the
+     DOM or exhausted its retry budget. Click it (falling back to a
+     dispatched `.click()` if a real mouse click is intercepted by an
+     overlay) and wait for navigation — or for a new tab, if the control
+     opens one.
    - If nothing is found: return to the course list once, and if a second
      consecutive pass still finds nothing, the run ends — that's the actual
      "no more content" signal, not an iteration counter running out.
@@ -139,8 +154,9 @@ DIKSHA_SPEED=1.0 DIKSHA_LOG_LEVEL=debug node diksha-progress-monitor.js --url="h
 | `diksha-diagnostic.js` | per-frame page structure report |
 | `config.js` | all tunables, env/flag overrides |
 | `lib/browser.js` | launch, login detection, graceful shutdown |
-| `lib/dom.js` | cross-frame element search, click, progress-settle polling |
+| `lib/dom.js` | cross-frame element search, click, DOM completion detection |
 | `lib/video.js` | video detection, playback, completion polling |
+| `lib/pdf.js` | PDF.js viewer detection, page-by-page scroll polling |
 | `lib/progress.js` | load/save `.local/progress.json` |
 | `.local/` | gitignored — profile, progress file, diagnostic reports |
 
@@ -153,9 +169,16 @@ exclude patterns. Adjust `INCLUDE_PATTERNS` / `EXCLUDE_PATTERNS` in
 `config.js` accordingly.
 
 **Video plays but progress never records.** Try `DIKSHA_SPEED=1.0` (see
-above). Also check `.local/diksha-diagnostic.json` for a completion marker
-class/attribute on that module and confirm it matches the selector in
-`waitForProgressSettle()` (`lib/dom.js`).
+above). Completion is read from each row's `.module-progress-pie` element
+(`title="N%"`, a `.fa-check` icon at 100%) — if DIKSHA changes this markup,
+update the selector in `waitForModuleComplete()` / `checkDomCompletion()`
+(`lib/dom.js`), and use `npm run diagnose` to see the current structure.
+
+**PDF doesn't seem to be scrolling.** The PDF handling assumes DIKSHA's
+bundled Mozilla PDF.js viewer (`window.PDFViewerApplication` +
+`#viewerContainer`). If a course serves PDFs through a different viewer,
+`findPdfViewer()` (`lib/pdf.js`) won't recognize it — run `npm run diagnose`
+while that content is open to see what's actually there.
 
 **"Profile is locked" on launch.** Another Chrome process is using
 `.local/diksha-profile`. Close all Chrome windows using that profile, or

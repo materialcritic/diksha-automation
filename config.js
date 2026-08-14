@@ -64,6 +64,11 @@ module.exports = {
   MAX_RETRIES_PER_MODULE: 3,
   MAX_ITEMS_PER_SECTION: 150,
 
+  // PDF.js viewer (DIKSHA serves readings/PPTs through vendor/pdf-viewer/web/viewer.html).
+  PDF_PAGE_DELAY_MS: Number(process.env.DIKSHA_PDF_PAGE_DELAY_MS || 1500),
+  PDF_STALL_MS: 60000,
+  PDF_MAX_MS: 60 * 60 * 1000,
+
   INCLUDE_PATTERNS: ["\\bview\\b", "\\bstart\\b", "\\bresume\\b", "\\bcontinue\\b"],
   EXCLUDE_PATTERNS: [
     "view all", "view more", "view profile", "view grade",

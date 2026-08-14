@@ -2,7 +2,7 @@ const fs = require("fs");
 const cfg = require("./config");
 const { log } = require("./lib/log");
 const { launch, ensureLoggedIn } = require("./lib/browser");
-const { CLICKABLE } = require("./lib/dom");
+const { CLICKABLE, waitForCourseListReady } = require("./lib/dom");
 
 const KEEP_OPEN = process.argv.includes("--keep-open");
 
@@ -102,7 +102,7 @@ function section(title, data) {
   log("info", "DIAG", `Opening: ${cfg.COURSE_URL}`);
   await page.goto(cfg.COURSE_URL, { waitUntil: "domcontentloaded", timeout: cfg.NAV_TIMEOUT_MS });
   await ensureLoggedIn(page);
-  await new Promise((r) => setTimeout(r, 3000));
+  await waitForCourseListReady(page);
 
   const frames = page.frames();
   log("info", "DIAG", `Found ${frames.length} frame(s). Collecting...`);

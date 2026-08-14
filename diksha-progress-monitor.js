@@ -1,8 +1,12 @@
 const cfg = require("./config");
 const { log } = require("./lib/log");
 const { launch, ensureLoggedIn, installShutdown } = require("./lib/browser");
-const { findClickable, clickElement, primePage, waitForProgressSettle } = require("./lib/dom");
+const {
+  findClickable, clickElement, primePage, waitForCourseListReady,
+  syncCompletedFromDom, waitForModuleComplete,
+} = require("./lib/dom");
 const { findVideo, configureAndPlay, waitForVideoEnd } = require("./lib/video");
+const { findPdfViewer, readPdf } = require("./lib/pdf");
 const { loadProgress, saveProgress } = require("./lib/progress");
 
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -37,6 +41,7 @@ async function returnToCourseList(session) {
     waitUntil: "domcontentloaded",
     timeout: cfg.NAV_TIMEOUT_MS,
   });
+  await waitForCourseListReady(session.page);
   await primePage(session.page);
 }
 
@@ -51,7 +56,10 @@ async function returnToCourseList(session) {
 
   await page.goto(cfg.COURSE_URL, { waitUntil: "domcontentloaded", timeout: cfg.NAV_TIMEOUT_MS });
   if (!(await ensureLoggedIn(page))) process.exit(2);
+  await waitForCourseListReady(page);
   await primePage(page);
+  await syncCompletedFromDom(page, state);
+  saveProgress(state);
 
   let completedThisRun = 0, failedThisRun = 0, idlePasses = 0;
 
@@ -59,24 +67,61 @@ async function returnToCourseList(session) {
     const video = await findVideo(session.page);
     if (video) {
       idlePasses = 0;
+      const key = session.currentKey;
       const ok = await configureAndPlay(video.frame, video.handle);
       let outcome = "error";
       if (ok) outcome = await waitForVideoEnd(video.frame, video.handle);
       await video.handle.dispose().catch(() => {});
       log("info", "VIDEO", `Outcome: ${outcome}`);
 
-      if (outcome === "ended") {
-        await waitForProgressSettle(session.page);
-        if (session.currentKey) { state.completed.add(session.currentKey); completedThisRun++; }
-      } else {
-        if (session.currentKey) {
-          state.failed.set(session.currentKey, (state.failed.get(session.currentKey) || 0) + 1);
+      await delay(3000); // let DIKSHA's backend register the event before we navigate away
+      await returnToCourseList(session);
+      await syncCompletedFromDom(session.page, state);
+
+      if (outcome === "ended" && key) {
+        const settled = await waitForModuleComplete(session.page, key);
+        if (settled.completed) {
+          state.completed.add(key);
+          completedThisRun++;
+        } else {
+          state.failed.set(key, (state.failed.get(key) || 0) + 1);
+          failedThisRun++;
         }
+      } else if (key) {
+        state.failed.set(key, (state.failed.get(key) || 0) + 1);
         failedThisRun++;
       }
       saveProgress(state);
       session.currentKey = null;
+      continue;
+    }
+
+    const pdf = await findPdfViewer(session.page);
+    if (pdf) {
+      idlePasses = 0;
+      const key = session.currentKey;
+      const outcome = await readPdf(pdf);
+      log("info", "PDF", `Outcome: ${outcome}`);
+
+      await delay(3000);
       await returnToCourseList(session);
+      await syncCompletedFromDom(session.page, state);
+
+      if (outcome === "ended" && key) {
+        const settled = await waitForModuleComplete(session.page, key);
+        if (settled.completed) {
+          state.completed.add(key);
+          completedThisRun++;
+        } else {
+          state.failed.set(key, (state.failed.get(key) || 0) + 1);
+          failedThisRun++;
+        }
+      } else if (key) {
+        state.failed.set(key, (state.failed.get(key) || 0) + 1);
+        failedThisRun++;
+      }
+      saveProgress(state);
+      session.currentKey = null;
       continue;
     }
 
@@ -91,6 +136,7 @@ async function returnToCourseList(session) {
         log("error", "MODULE", `Click failed: ${err.message}`);
         state.failed.set(candidate.key, (state.failed.get(candidate.key) || 0) + 1);
         failedThisRun++;
+        session.currentKey = null;
         await returnToCourseList(session);
       } finally {
         await candidate.element.dispose().catch(() => {});
