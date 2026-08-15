@@ -151,6 +151,12 @@ DIKSHA_SPEED=1.0 DIKSHA_LOG_LEVEL=debug node diksha-progress-monitor.js --url="h
 2. **Priming** — scrolls the page once top-to-bottom to trigger lazy-loaded
    content, then back to the top.
 3. **Main loop**, each iteration:
+   - If a Video.js "big play button" is present (confirmed live: "Live
+     Session" items wrap a YouTube embed this way, and don't populate a
+     real `<video>` element — everything stays empty and unstarted — until
+     that button is clicked), click it and give the embed a couple of
+     seconds to actually initialize. Videos that don't use this pattern are
+     unaffected; this is a no-op when the button isn't there.
    - If a `<video>` element exists on the current page (any frame): mute it,
      set its rate, play it, and poll for real completion (ended, or a
      stall/error/timeout).

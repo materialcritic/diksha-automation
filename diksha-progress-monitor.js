@@ -5,7 +5,7 @@ const {
   findClickable, clickElement, expandNextModule, primePage, waitForCourseListReady,
   syncCompletedFromDom, waitForModuleComplete,
 } = require("./lib/dom");
-const { findVideo, configureAndPlay, waitForVideoEnd } = require("./lib/video");
+const { findVideo, configureAndPlay, waitForVideoEnd, clickPlayButtonIfPresent } = require("./lib/video");
 const { findPdfViewer, readPdf } = require("./lib/pdf");
 const { loadProgress, saveProgress } = require("./lib/progress");
 const { resolveTrouble } = require("./lib/prompt");
@@ -86,6 +86,13 @@ async function runLoop(session, state) {
   session.currentKey = null; // avoid misattributing progress to a stale key after a restart
 
   while (completedThisRun + failedThisRun < cfg.MAX_MODULES) {
+    // "Live Session" items wrap a YouTube embed in a Video.js player that
+    // doesn't populate a real <video> element until its own play button is
+    // clicked — confirmed live. Harmless no-op on pages without that button.
+    if (await clickPlayButtonIfPresent(session.page)) {
+      await delay(2000);
+    }
+
     const video = await findVideo(session.page);
     if (video) {
       idlePasses = 0;
