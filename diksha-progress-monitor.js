@@ -8,7 +8,9 @@ const {
 const { findVideo, configureAndPlay, waitForVideoEnd, clickPlayButtonIfPresent } = require("./lib/video");
 const { findPdfViewer, readPdf } = require("./lib/pdf");
 const { loadProgress, saveProgress } = require("./lib/progress");
-const { resolveTrouble } = require("./lib/prompt");
+const { resolveTrouble, resolveCourseSwitch } = require("./lib/prompt");
+const { listEnrolledCourses, extractCourseId } = require("./lib/courses");
+const pause = require("./lib/pause");
 
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -86,6 +88,12 @@ async function runLoop(session, state) {
   session.currentKey = null; // avoid misattributing progress to a stale key after a restart
 
   while (completedThisRun + failedThisRun < cfg.MAX_MODULES) {
+    if (pause.consumePauseRequest()) {
+      const choice = await pause.pauseAndWaitForResume();
+      if (choice === "close") return { completedThisRun, failedThisRun, closeRequested: true };
+      continue;
+    }
+
     // "Live Session" items wrap a YouTube embed in a Video.js player that
     // doesn't populate a real <video> element until its own play button is
     // clicked — confirmed live. Harmless no-op on pages without that button.
@@ -102,6 +110,7 @@ async function runLoop(session, state) {
       if (ok) outcome = await waitForVideoEnd(video.frame, video.handle);
       await video.handle.dispose().catch(() => {});
       log("info", "VIDEO", `Outcome: ${outcome}`);
+      if (outcome === "closed") return { completedThisRun, failedThisRun, closeRequested: true };
 
       await delay(cfg.POST_CONTENT_SETTLE_MS);
       await returnToCourseList(session);
@@ -133,6 +142,7 @@ async function runLoop(session, state) {
       const key = session.currentKey;
       const outcome = await readPdf(pdf);
       log("info", "PDF", `Outcome: ${outcome}`);
+      if (outcome === "closed") return { completedThisRun, failedThisRun, closeRequested: true };
 
       await delay(cfg.POST_CONTENT_SETTLE_MS);
       await returnToCourseList(session);
@@ -196,12 +206,25 @@ async function runLoop(session, state) {
       continue;
     }
 
-    const choice = await resolveTrouble(
-      "No content found",
-      `Scanned the course list ${cfg.MAX_IDLE_PASSES} times with nothing to do — no video, no PDF, no unvisited module. This usually means the course is actually finished, but could also mean something on the page isn't being recognized.`,
-      "The browser is open on the course list. Look around, and continue when you're ready."
-    );
-    if (choice === "close") return { completedThisRun, failedThisRun, closeRequested: true };
+    // Scanned everything (including expanding every module) and found
+    // nothing — this course is very likely finished. Look up the real
+    // completion state and other enrolled courses so the choice below is
+    // informed, not a guess.
+    const courses = await listEnrolledCourses(session.page).catch((err) => {
+      log("warn", "COURSES", `Could not read course listing: ${err.message}`);
+      return [];
+    });
+    const currentId = extractCourseId(cfg.COURSE_URL);
+    const current = courses.find((c) => extractCourseId(c.url) === currentId);
+    const others = courses.filter((c) => extractCourseId(c.url) !== currentId);
+
+    const decision = await resolveCourseSwitch(others, current ? current.percent : null);
+
+    if (decision.action === "close") return { completedThisRun, failedThisRun, closeRequested: true };
+    if (decision.action === "switch") {
+      log("info", "COURSE", `Switching to: ${decision.title}`);
+      cfg.COURSE_URL = decision.url;
+    }
     idlePasses = 0;
     await returnToCourseList(session);
   }
@@ -210,6 +233,9 @@ async function runLoop(session, state) {
 }
 
 (async () => {
+  pause.install();
+  log("info", "PAUSE", "Press Escape at any time to pause; Enter to see what to do next.");
+
   let browser, page;
   while (true) {
     try {

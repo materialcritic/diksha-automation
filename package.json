@@ -10,7 +10,7 @@
   "scripts": {
     "start": "node diksha-progress-monitor.js",
     "diagnose": "node diksha-diagnostic.js",
-    "check": "node --check diksha-progress-monitor.js && node --check diksha-diagnostic.js && node --check config.js && node --check lib/log.js && node --check lib/browser.js && node --check lib/dom.js && node --check lib/video.js && node --check lib/pdf.js && node --check lib/progress.js && node --check lib/prompt.js"
+    "check": "node --check diksha-progress-monitor.js && node --check diksha-diagnostic.js && node --check config.js && node --check lib/log.js && node --check lib/browser.js && node --check lib/dom.js && node --check lib/video.js && node --check lib/pdf.js && node --check lib/progress.js && node --check lib/prompt.js && node --check lib/pause.js && node --check lib/courses.js"
   },
   "dependencies": {
     "puppeteer": "^23.11.1"

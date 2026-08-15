@@ -11,7 +11,9 @@
 
 Puppeteer automation that opens a DIKSHA course, plays each module's video to
 completion, and moves on to the next unvisited module — using a persistent,
-resumable, on-disk progress record.
+resumable, on-disk progress record. When a course runs out of content, it
+looks up your other enrolled courses and lets you switch (never
+automatically). Press Escape at any time to pause.
 
 ## What this actually does
 
@@ -202,6 +204,35 @@ DIKSHA_SPEED=1.0 DIKSHA_LOG_LEVEL=debug node diksha-progress-monitor.js --url="h
      and picks it back up.
    `Ctrl+C` is the one thing that still closes immediately — that's treated
    as an explicit "stop now," not an error the app needs to ask about.
+5. **When the "no content found" scan above is actually "this course is
+   done,"** instead of just the plain menu, it looks up your other enrolled
+   courses (via "My Learning") with their real completion percentages and
+   presents them as numbered options, alongside staying on this course,
+   entering a URL directly, taking over manually, or closing. **It never
+   switches on its own** — a choice always has to be made. If you pick a
+   course, `COURSE_URL` is updated in memory (not written back to
+   `config.js` or `.env`) and the automation loop continues against it,
+   reusing the same browser, profile, and `.local/progress.json` — module
+   keys are DIKSHA-wide activity IDs, so progress tracking carries over
+   correctly across courses.
+   > Course pages structure their content differently from course to
+   > course — confirmed live across two courses in the same account. One
+   > used `Module 1:`, `Module 2:`, ... naming; the other used `Module
+   > Overview` / `Module Learning Content`. Section-expansion is written as
+   > a deny-list (skip `Course Overview`/`Assessment`/`Certificate`, expand
+   > everything else) specifically because of this — but courses beyond the
+   > two tested may still differ in ways this hasn't encountered yet.
+
+## Pause and resume
+
+Press `Escape` at any time — while a video is playing, a PDF is scrolling,
+or between modules — to pause. Whatever's active (video/PDF) is explicitly
+paused client-side, not just abandoned mid-flight. Press `Enter` in the
+terminal to bring up the same close/take-over/retry menu described above;
+choosing Retry resumes exactly where it left off (the paused video/PDF
+un-pauses and picks up its own polling loop again). This needs a real
+terminal (a TTY) to detect the keypress — it's silently unavailable if stdin
+is piped or redirected, and the rest of the script runs normally either way.
 
 ## Shutdown
 
@@ -224,7 +255,9 @@ profile, not a fresh launch.
 | `lib/video.js` | video detection, playback, completion polling |
 | `lib/pdf.js` | PDF.js viewer detection, page-by-page scroll polling |
 | `lib/progress.js` | load/save `.local/progress.json` |
-| `lib/prompt.js` | the close/take-over/retry terminal menu |
+| `lib/prompt.js` | the close/take-over/retry terminal menu, course-switch menu |
+| `lib/pause.js` | Escape-to-pause keypress detection |
+| `lib/courses.js` | reads "My Learning" for other enrolled courses |
 | `.local/` | gitignored — profile, progress file, diagnostic reports |
 
 ## Troubleshooting
