@@ -2,7 +2,7 @@ const cfg = require("./config");
 const { log } = require("./lib/log");
 const { launch, ensureLoggedIn, installShutdown } = require("./lib/browser");
 const {
-  findClickable, clickElement, primePage, waitForCourseListReady,
+  findClickable, clickElement, expandNextModule, primePage, waitForCourseListReady,
   syncCompletedFromDom, waitForModuleComplete,
 } = require("./lib/dom");
 const { findVideo, configureAndPlay, waitForVideoEnd } = require("./lib/video");
@@ -169,6 +169,15 @@ async function runLoop(session, state) {
         continue;
       }
       await candidate.element.dispose().catch(() => {});
+      continue;
+    }
+
+    // Nothing visible right now doesn't mean nothing's left — only the
+    // module named in the URL auto-expands; the rest sit collapsed and
+    // invisible to findClickable until their accordion header is clicked.
+    if (await expandNextModule(session.page)) {
+      idlePasses = 0;
+      await delay(800);
       continue;
     }
 

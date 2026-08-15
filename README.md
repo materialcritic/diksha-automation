@@ -61,6 +61,25 @@ close/take-over/retry prompt (see "How it works" below) rather than being
 silently abandoned. If a module keeps plateauing, try a lower `DIKSHA_SPEED`
 (1.5 has completed cleanly in testing) for that course.
 
+## DIKSHA's completion percentage is not monotonic
+
+Observed live: a module previously confirmed at 100% (present in
+`.local/progress.json`'s `completed` list) was later found at 94% in the
+live DOM — after being reopened and not watched through, its recorded
+percentage on DIKSHA's own server had *dropped*. This means "already
+completed" is not a fact that, once true, stays true; opening an already-
+finished module and not finishing it again can regress real progress. Two
+consequences this script is built around:
+
+- **Only the live DOM decides "already done."** The on-disk `completed`
+  record is not trusted to skip a module — a stale local record saying
+  "done" is deliberately not enough to hide a module the DOM currently shows
+  isn't. If DIKSHA regresses something, this script will notice and redo it
+  rather than silently leaving it under-credited.
+- **Don't manually reopen already-completed items** while this script (or
+  you) might not watch them through in that session — that's the specific
+  action that caused the regression observed above.
+
 ## Prerequisites
 
 - Node.js 18+
@@ -145,13 +164,23 @@ DIKSHA_SPEED=1.0 DIKSHA_LOG_LEVEL=debug node diksha-progress-monitor.js --url="h
    - Otherwise, search every frame for the first clickable control that
      matches the include patterns, doesn't match the exclude patterns, is
      visible and enabled, isn't locked, and isn't already complete per the
-     DOM or exhausted its retry budget. Click it (falling back to a
-     dispatched `.click()` if a real mouse click is intercepted by an
-     overlay) and wait for navigation — or for a new tab, if the control
-     opens one.
-   - If nothing is found: return to the course list once, and if a second
-     consecutive pass still finds nothing, that's the "no more content"
-     signal — see step 4 below for what happens next.
+     live DOM (a stale on-disk "completed" record is deliberately *not*
+     enough to skip a module — see the note on DIKSHA's percentage below).
+     Click it (falling back to a dispatched `.click()` if a real mouse click
+     is intercepted by an overlay) and wait for navigation — or for a new
+     tab, if the control opens one.
+   - If nothing is found: only the module named in the course URL's
+     `section` param auto-expands on page load — everything else sits
+     collapsed and invisible to the search above. Before treating this as
+     "nothing left," find and click the first still-collapsed "Module N:"
+     accordion header (skipping non-module sections like "Course Overview,"
+     "Assessment," "Certificate," which have no video/PDF/View content this
+     script recognizes) and scan again. Document order means an earlier
+     module with leftover content gets revisited before a later one is ever
+     expanded.
+   - Only once expansion finds no more collapsed modules and two
+     consecutive scans still find nothing does "no more content" apply —
+     see step 4 below for what happens then.
 4. **When something the app can't resolve on its own comes up**, it stops and
    asks instead of quitting the browser on its own. This covers: Chrome
    failing to launch, login not detected within the wait window, no content
