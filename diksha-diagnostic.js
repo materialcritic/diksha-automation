@@ -3,6 +3,7 @@ const cfg = require("./config");
 const { log } = require("./lib/log");
 const { launch, ensureLoggedIn } = require("./lib/browser");
 const { CLICKABLE, waitForCourseListReady } = require("./lib/dom");
+const { chooseCourse } = require("./lib/courses");
 
 const KEEP_OPEN = process.argv.includes("--keep-open");
 
@@ -99,9 +100,23 @@ function section(title, data) {
 
 (async () => {
   const { browser, page } = await launch();
+  await page.goto(cfg.COURSE_URL || cfg.COURSE_LISTING_URL, {
+    waitUntil: "domcontentloaded",
+    timeout: cfg.NAV_TIMEOUT_MS,
+  });
+  await ensureLoggedIn(page);
+
+  if (!cfg.COURSE_URL) {
+    const pick = await chooseCourse(page, { title: "Which course do you want to diagnose?" });
+    if (pick.action === "close") {
+      await browser.close().catch(() => {});
+      process.exit(0);
+    }
+    cfg.setCourseUrl(pick.url);
+  }
+
   log("info", "DIAG", `Opening: ${cfg.COURSE_URL}`);
   await page.goto(cfg.COURSE_URL, { waitUntil: "domcontentloaded", timeout: cfg.NAV_TIMEOUT_MS });
-  await ensureLoggedIn(page);
   await waitForCourseListReady(page);
 
   const frames = page.frames();

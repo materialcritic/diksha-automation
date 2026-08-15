@@ -36,11 +36,22 @@ function resolveChromePath() {
   return undefined;
 }
 
-module.exports = {
-  COURSE_URL:
-    argValue("url") ||
-    process.env.DIKSHA_COURSE_URL ||
-    "https://learning.diksha.gov.in/diksha/course.php?id=1544&section=3096&modeActive=10351",
+// `--pick` forces the course picker even when a URL was supplied.
+const FORCE_PICK = process.argv.includes("--pick");
+const EXPLICIT_COURSE_URL = FORCE_PICK
+  ? null
+  : argValue("url") || process.env.DIKSHA_COURSE_URL || null;
+
+const cfg = {
+  // There is deliberately no default course. A null COURSE_URL means "ask the
+  // user which course to work on" — a hardcoded default was the reason every
+  // cold start and every crash-recovery bounced back to the same NEP course
+  // regardless of what the user was actually working through.
+  COURSE_URL: EXPLICIT_COURSE_URL,
+  COURSE_URL_EXPLICIT: Boolean(EXPLICIT_COURSE_URL),
+  COURSE_LISTING_URL:
+    process.env.DIKSHA_COURSE_LISTING_URL ||
+    "https://learning.diksha.gov.in/diksha/course_listing.php",
 
   CHROME_PATH: resolveChromePath(),
   LOCAL_DIR,
@@ -61,11 +72,6 @@ module.exports = {
   CLICK_NAV_TIMEOUT_MS: 6000,
   SETTLE_MS: 1000,
   // Wait after a video/PDF ends, before navigating back to the course list.
-  // Navigating away (page.goto) aborts any in-flight request on the current
-  // page — if DIKSHA's "mark complete" call fires asynchronously right as
-  // the content ends and takes longer than this to land, leaving too soon
-  // kills it mid-flight. Observed live: completion plateaued at 97% with a
-  // 3s wait; DIKSHA_POST_CONTENT_SETTLE_MS lets this be tuned per course.
   POST_CONTENT_SETTLE_MS: Number(process.env.DIKSHA_POST_CONTENT_SETTLE_MS || 20000),
   LOGIN_WAIT_MS: 300000,
   VIDEO_STALL_MS: 60000,
@@ -75,6 +81,16 @@ module.exports = {
   MAX_IDLE_PASSES: 8,
   MAX_RETRIES_PER_MODULE: 3,
   MAX_ITEMS_PER_SECTION: 150,
+
+  // Accordion sections are populated by an async request after the header is
+  // clicked. A fixed sleep was too short — confirmed live, a View button stayed
+  // invisible to findClickable through six expansion cycles and only appeared
+  // after a ~33s pause. Poll for the DOM to stop growing instead.
+  SECTION_SETTLE_MS: Number(process.env.DIKSHA_SECTION_SETTLE_MS || 6000),
+  MAX_SECTIONS_PER_PAGE: 40,
+  // How many times a control may be clicked without producing a video or a PDF
+  // before it's recorded as a failed module.
+  MAX_OPEN_ATTEMPTS: 5,
 
   // PDF.js viewer (DIKSHA serves readings/PPTs through vendor/pdf-viewer/web/viewer.html).
   PDF_PAGE_DELAY_MS: Number(process.env.DIKSHA_PDF_PAGE_DELAY_MS || 1500),
@@ -87,3 +103,15 @@ module.exports = {
     "viewed", "logout", "sign out", "download",
   ],
 };
+
+// The one place COURSE_URL is allowed to change. Course cards on the listing
+// page carried absolute hrefs when directly inspected live, but resolving
+// against the listing URL here is a harmless no-op in that case and a real
+// fix if that markup ever changes — page.goto() rejects a relative URL.
+cfg.setCourseUrl = function setCourseUrl(url) {
+  if (!url || !String(url).trim()) throw new Error("setCourseUrl: empty URL");
+  cfg.COURSE_URL = new URL(String(url).trim(), cfg.COURSE_LISTING_URL).href;
+  return cfg.COURSE_URL;
+};
+
+module.exports = cfg;

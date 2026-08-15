@@ -107,9 +107,20 @@ cd diksha-automation && npm start
 On first run, Chrome opens with a fresh profile at `.local/diksha-profile`
 (gitignored — never committed). If you're not logged in, the script prints a
 prompt and waits up to 5 minutes for you to log in manually in the browser
-window. After that, it proceeds unattended: find content → play/wait →
-record progress → find next content → repeat, until it runs out of new
-content or hits the module budget (`MAX_MODULES`, default 200).
+window.
+
+Once signed in, if no course was specified on the command line, it opens
+your "My Learning" page, lists every enrolled course with its real
+completion percentage, and asks which one to work on. It stays on that
+course for the rest of the run — including after an error recovery — and
+only ever changes course when you pick a new one from the end-of-course
+menu. Pass `--url=...` (or set `DIKSHA_COURSE_URL`) to skip the picker and
+go straight to a course; pass `--pick` to force the picker even when a URL
+is set.
+
+After that, it proceeds unattended: find content → play/wait → record
+progress → find next content → repeat, until it runs out of new content or
+hits the module budget (`MAX_MODULES`, default 200).
 
 ### Run the diagnostic
 
@@ -133,8 +144,11 @@ without editing code:
 
 | Env var / flag | Default | Purpose |
 |---|---|---|
-| `--url=<url>` or `DIKSHA_COURSE_URL` | the sample course URL | target course |
-| `DIKSHA_SPEED` | `1.0` | video `playbackRate` |
+| `--url=<url>` or `DIKSHA_COURSE_URL` | *(none — you're asked to pick)* | skip the course picker and go straight to this course |
+| `--pick` | off | force the course picker even when a URL is set |
+| `DIKSHA_SPEED` | `5.0` | video `playbackRate` |
+| `DIKSHA_POST_CONTENT_SETTLE_MS` | `20000` | wait after content ends before navigating away |
+| `DIKSHA_SECTION_SETTLE_MS` | `6000` | how long to wait for an expanded section's content to load |
 | `DIKSHA_PROFILE_DIR` | `.local/diksha-profile` | Chrome profile location |
 | `DIKSHA_LOCAL_DIR` | `.local` | base dir for profile/progress/reports |
 | `CHROME_PATH` | auto-detected | browser executable |
@@ -143,7 +157,7 @@ without editing code:
 Example:
 
 ```bash
-DIKSHA_SPEED=1.0 DIKSHA_LOG_LEVEL=debug node diksha-progress-monitor.js --url="https://learning.diksha.gov.in/diksha/course.php?id=..."
+DIKSHA_LOG_LEVEL=debug node diksha-progress-monitor.js --url="https://learning.diksha.gov.in/diksha/course.php?id=..."
 ```
 
 ## How it works
@@ -176,19 +190,21 @@ DIKSHA_SPEED=1.0 DIKSHA_LOG_LEVEL=debug node diksha-progress-monitor.js --url="h
      enough to skip a module — see the note on DIKSHA's percentage below).
      Click it (falling back to a dispatched `.click()` if a real mouse click
      is intercepted by an overlay) and wait for navigation — or for a new
-     tab, if the control opens one.
-   - If nothing is found: only the module named in the course URL's
-     `section` param auto-expands on page load — everything else sits
-     collapsed and invisible to the search above. Before treating this as
-     "nothing left," find and click the first still-collapsed "Module N:"
-     accordion header (skipping non-module sections like "Course Overview,"
-     "Assessment," "Certificate," which have no video/PDF/View content this
-     script recognizes) and scan again. Document order means an earlier
-     module with leftover content gets revisited before a later one is ever
-     expanded.
-   - Only once expansion finds no more collapsed modules and two
-     consecutive scans still find nothing does "no more content" apply —
-     see step 4 below for what happens then.
+     tab, if the control opens one. If the same control gets opened
+     `MAX_OPEN_ATTEMPTS` times in a row without ever producing a video or a
+     PDF, it's recorded as a failure instead of being clicked forever.
+   - Only the module named in the course URL's `section` param auto-expands
+     on page load — everything else sits collapsed and invisible to the
+     search above. Every page load (including every return to the course
+     list) is followed by a full expansion sweep: each still-collapsed
+     accordion header is clicked in turn (skipping non-content sections like
+     "Course Overview," "Assessment," "Certificate") and its content is
+     polled until it stops growing — a fixed sleep here was confirmed live
+     to be too short, sometimes by tens of seconds — before moving to the
+     next one. Because expansion happens once per page load rather than one
+     section per loop iteration, "no more content" is a real, reachable
+     conclusion: it's only declared after a fully-expanded page produces two
+     consecutive empty scans.
 4. **When something the app can't resolve on its own comes up**, it stops and
    asks instead of quitting the browser on its own. This covers: Chrome
    failing to launch, login not detected within the wait window, no content
@@ -204,17 +220,20 @@ DIKSHA_SPEED=1.0 DIKSHA_LOG_LEVEL=debug node diksha-progress-monitor.js --url="h
      and picks it back up.
    `Ctrl+C` is the one thing that still closes immediately — that's treated
    as an explicit "stop now," not an error the app needs to ask about.
-5. **When the "no content found" scan above is actually "this course is
-   done,"** instead of just the plain menu, it looks up your other enrolled
-   courses (via "My Learning") with their real completion percentages and
-   presents them as numbered options, alongside staying on this course,
-   entering a URL directly, taking over manually, or closing. **It never
-   switches on its own** — a choice always has to be made. If you pick a
-   course, `COURSE_URL` is updated in memory (not written back to
-   `config.js` or `.env`) and the automation loop continues against it,
-   reusing the same browser, profile, and `.local/progress.json` — module
-   keys are DIKSHA-wide activity IDs, so progress tracking carries over
-   correctly across courses.
+5. **The same course menu drives two different moments**: at startup, if no
+   course was given on the command line (see Usage above); and whenever the
+   "no content found" scan above concludes this course is actually done —
+   at which point it looks up your other enrolled courses (via "My
+   Learning") with their real completion percentages and presents them as
+   numbered options, alongside staying on this course, entering a URL
+   directly, taking over manually, or closing. **It never switches on its
+   own** — a choice always has to be made. If you pick a course, `COURSE_URL`
+   is updated in memory (not written back to `config.js` or `.env`) and the
+   automation loop continues against it, reusing the same browser, profile,
+   and `.local/progress.json` — module keys are DIKSHA-wide activity IDs, so
+   progress tracking carries over correctly across courses. A restart after
+   an error keeps whatever course was already chosen rather than falling
+   back to asking again or reverting to a default.
    > Course pages structure their content differently from course to
    > course — confirmed live across two courses in the same account. One
    > used `Module 1:`, `Module 2:`, ... naming; the other used `Module
@@ -240,8 +259,12 @@ is piped or redirected, and the rest of the script runs normally either way.
 close itself). An unhandled rejection or uncaught exception instead goes
 through the same choice menu described above (title: "The app hit an
 unexpected error") — the browser is left open and, if you choose Retry, the
-automation loop restarts from the course list using the same browser and
-profile, not a fresh launch.
+automation loop restarts using the same browser, profile, and whatever
+course was already chosen — not a fresh launch, and not the picker again.
+Internally this is a fresh run rather than a recursive restart: each run
+carries a generation number, and the stale run notices at its next
+checkpoint and stops on its own instead of continuing to drive the browser
+alongside the new one.
 
 ## Files
 

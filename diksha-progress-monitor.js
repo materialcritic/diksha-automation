@@ -2,24 +2,34 @@ const cfg = require("./config");
 const { log } = require("./lib/log");
 const { launch, ensureLoggedIn, installShutdown } = require("./lib/browser");
 const {
-  findClickable, clickElement, expandNextModule, primePage, waitForCourseListReady,
-  syncCompletedFromDom, waitForModuleComplete,
+  findClickable, clickElement, expandNextModule, expandAllSections, waitForContentSettled,
+  primePage, waitForCourseListReady, syncCompletedFromDom, waitForModuleComplete,
 } = require("./lib/dom");
 const { findVideo, configureAndPlay, waitForVideoEnd, clickPlayButtonIfPresent } = require("./lib/video");
 const { findPdfViewer, readPdf } = require("./lib/pdf");
 const { loadProgress, saveProgress } = require("./lib/progress");
-const { resolveTrouble, resolveCourseSwitch } = require("./lib/prompt");
-const { listEnrolledCourses, extractCourseId } = require("./lib/courses");
+const { resolveTrouble } = require("./lib/prompt");
+const { chooseCourse, extractCourseId } = require("./lib/courses");
 const pause = require("./lib/pause");
 
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// --- run generations --------------------------------------------------
+// onFatal fires from an unhandledRejection handler, i.e. from outside the
+// await chain the loop is sitting in. The old code called main() recursively
+// from there, which left the original runLoop alive and driving the same
+// browser — two loops, one page. Instead each run carries a generation number;
+// asking for a restart bumps it, the stale loop notices at its next checkpoint
+// and returns, and the top-level driver starts a clean run.
+let generation = 0;
+let signalRestart = () => {};
+const isStale = (gen) => gen !== generation;
 
 // Opening a video is an in-page modal here — confirmed live, the URL never
 // changes — so waiting on navigation alone means the video plays unmuted at
 // full speed for however long that wait takes. Poll for either a real
 // navigation or the video actually appearing, and stop as soon as either
-// happens, so mute/rate get applied within a few hundred ms instead of after
-// a fixed multi-second timeout.
+// happens.
 async function clickAndSettle(session, frame, element) {
   const before = new Set(await session.browser.pages());
   const startUrl = session.page.url();
@@ -44,6 +54,10 @@ async function clickAndSettle(session, frame, element) {
   }
 }
 
+// Reload the course page and put it back into a fully-scannable state.
+// expandAllSections is the important part: page.goto collapses every accordion,
+// and expanding them one-per-loop-iteration (the old shape) meant every reload
+// reset idlePasses and the run could never conclude.
 async function returnToCourseList(session) {
   if (session.popup) {
     await session.popup.close().catch(() => {});
@@ -57,14 +71,11 @@ async function returnToCourseList(session) {
   });
   await waitForCourseListReady(session.page);
   await primePage(session.page);
+  await expandAllSections(session.page);
 }
 
 // Records a failure for `key` and, if that was its last retry, asks the user
-// what to do instead of letting it be silently abandoned forever. Returns
-// true if the caller should stop trying this key for now (either it's still
-// within budget and should just move on, or the user chose to close/retry
-// and the caller's loop will handle that separately) — false if the user
-// reset the budget and this key should be treated as immediately retryable.
+// what to do instead of letting it be silently abandoned forever.
 async function recordFailure(session, state, key, reason) {
   const count = (state.failed.get(key) || 0) + 1;
   state.failed.set(key, count);
@@ -77,26 +88,26 @@ async function recordFailure(session, state, key, reason) {
     `The browser is open on module ${key}. Fix whatever's needed (e.g. finish it manually), then continue.`
   );
   if (choice === "close") return "close";
-  // retry: give it a fresh budget so findClickable will pick it up again.
   state.failed.delete(key);
   saveProgress(state);
   return "retry";
 }
 
-async function runLoop(session, state) {
+async function runLoop(session, state, gen) {
   let completedThisRun = 0, failedThisRun = 0, idlePasses = 0;
-  session.currentKey = null; // avoid misattributing progress to a stale key after a restart
+  session.currentKey = null;
+  session.lastOpenedKey = null;
+  session.openAttempts = 0;
 
   while (completedThisRun + failedThisRun < cfg.MAX_MODULES) {
+    if (isStale(gen)) return { completedThisRun, failedThisRun, stale: true };
+
     if (pause.consumePauseRequest()) {
       const choice = await pause.pauseAndWaitForResume();
       if (choice === "close") return { completedThisRun, failedThisRun, closeRequested: true };
       continue;
     }
 
-    // "Live Session" items wrap a YouTube embed in a Video.js player that
-    // doesn't populate a real <video> element until its own play button is
-    // clicked — confirmed live. Harmless no-op on pages without that button.
     if (await clickPlayButtonIfPresent(session.page)) {
       await delay(2000);
     }
@@ -104,6 +115,7 @@ async function runLoop(session, state) {
     const video = await findVideo(session.page);
     if (video) {
       idlePasses = 0;
+      session.openAttempts = 0;
       const key = session.currentKey;
       const ok = await configureAndPlay(video.frame, video.handle);
       let outcome = "error";
@@ -139,6 +151,7 @@ async function runLoop(session, state) {
     const pdf = await findPdfViewer(session.page);
     if (pdf) {
       idlePasses = 0;
+      session.openAttempts = 0;
       const key = session.currentKey;
       const outcome = await readPdf(pdf);
       log("info", "PDF", `Outcome: ${outcome}`);
@@ -171,6 +184,32 @@ async function runLoop(session, state) {
     const candidate = await findClickable(session.page, state);
     if (candidate) {
       idlePasses = 0;
+
+      // Clicking a control that produces neither a video nor a PDF leaves the
+      // page unchanged, so the very same candidate is found again next pass —
+      // confirmed live, the same act: key was opened three times in a row.
+      // Count consecutive no-op opens and eventually record it as a failure so
+      // the module can't monopolise the loop.
+      if (candidate.key === session.lastOpenedKey) {
+        session.openAttempts++;
+      } else {
+        session.lastOpenedKey = candidate.key;
+        session.openAttempts = 1;
+      }
+      if (session.openAttempts > cfg.MAX_OPEN_ATTEMPTS) {
+        log("warn", "MODULE", `"${candidate.label}" (${candidate.key}) opened ${session.openAttempts - 1}x with no video or PDF.`);
+        const decision = await recordFailure(session, state, candidate.key,
+          `clicked ${session.openAttempts - 1} times but no video or PDF appeared`);
+        await candidate.element.dispose().catch(() => {});
+        session.lastOpenedKey = null;
+        session.openAttempts = 0;
+        session.currentKey = null;
+        if (decision === "close") return { completedThisRun, failedThisRun, closeRequested: true };
+        failedThisRun++;
+        await returnToCourseList(session);
+        continue;
+      }
+
       log("info", "MODULE", `Opening: "${candidate.label}" (${candidate.key})`);
       session.currentKey = candidate.key;
       try {
@@ -189,12 +228,12 @@ async function runLoop(session, state) {
       continue;
     }
 
-    // Nothing visible right now doesn't mean nothing's left — only the
-    // module named in the URL auto-expands; the rest sit collapsed and
-    // invisible to findClickable until their accordion header is clicked.
+    // Safety net only — returnToCourseList already expands everything after a
+    // reload. Deliberately does NOT reset idlePasses: it used to, and combined
+    // with the reload-collapses-everything behaviour that made the idle counter
+    // unable to ever reach MAX_IDLE_PASSES, so the run looped forever.
     if (await expandNextModule(session.page)) {
-      idlePasses = 0;
-      await delay(800);
+      await waitForContentSettled(session.page);
       continue;
     }
 
@@ -206,26 +245,25 @@ async function runLoop(session, state) {
       continue;
     }
 
-    // Scanned everything (including expanding every module) and found
-    // nothing — this course is very likely finished. Look up the real
-    // completion state and other enrolled courses so the choice below is
-    // informed, not a guess.
-    const courses = await listEnrolledCourses(session.page).catch((err) => {
-      log("warn", "COURSES", `Could not read course listing: ${err.message}`);
-      return [];
-    });
+    // Scanned everything, including a full expansion sweep, and found nothing —
+    // this course is very likely finished. Ask; never switch on our own.
     const currentId = extractCourseId(cfg.COURSE_URL);
-    const current = courses.find((c) => extractCourseId(c.url) === currentId);
-    const others = courses.filter((c) => extractCourseId(c.url) !== currentId);
-
-    const decision = await resolveCourseSwitch(others, current ? current.percent : null);
+    const decision = await chooseCourse(session.page, {
+      title: "This course looks done — what next?",
+      allowStay: true,
+      currentUrl: cfg.COURSE_URL,
+    });
 
     if (decision.action === "close") return { completedThisRun, failedThisRun, closeRequested: true };
-    if (decision.action === "switch") {
-      log("info", "COURSE", `Switching to: ${decision.title}`);
-      cfg.COURSE_URL = decision.url;
+    if (decision.action === "switch" && extractCourseId(decision.url) !== currentId) {
+      cfg.setCourseUrl(decision.url);
+      log("info", "COURSE", `Switching to: ${decision.title} (${cfg.COURSE_URL})`);
+    } else {
+      log("info", "COURSE", "Staying on the current course.");
     }
     idlePasses = 0;
+    session.lastOpenedKey = null;
+    session.openAttempts = 0;
     await returnToCourseList(session);
   }
 
@@ -255,6 +293,7 @@ async function runLoop(session, state) {
   const state = loadProgress();
   const session = {
     browser, page, rootPage: page, popup: null,
+    lastResult: null,
     saveProgress: () => saveProgress(state),
   };
 
@@ -266,13 +305,18 @@ async function runLoop(session, state) {
         "The browser is left open as-is. Continue when you're ready."
       );
       if (choice === "close") { await shutdown(`user chose close after ${label}`, 1); return; }
-      log("info", "RECOVER", "Restarting the automation loop.");
-      await main();
+      log("info", "RECOVER",
+        `Restarting the automation loop on: ${cfg.COURSE_URL || "(no course chosen yet)"}`);
+      signalRestart();
     },
   });
 
-  async function main() {
-    await page.goto(cfg.COURSE_URL, { waitUntil: "domcontentloaded", timeout: cfg.NAV_TIMEOUT_MS });
+  // Returns "close" | "done" | "stale".
+  async function main(gen) {
+    // Land on the course if we already have one, otherwise on "My Learning" —
+    // either way we need a signed-in session before anything else.
+    const landing = cfg.COURSE_URL || cfg.COURSE_LISTING_URL;
+    await session.page.goto(landing, { waitUntil: "domcontentloaded", timeout: cfg.NAV_TIMEOUT_MS });
 
     while (!(await ensureLoggedIn(session.page))) {
       const choice = await resolveTrouble(
@@ -280,20 +324,35 @@ async function runLoop(session, state) {
         "Didn't detect a successful login within the wait window.",
         "Log in in the browser window, then continue."
       );
-      if (choice === "close") { await shutdown("user chose close (not logged in)", 2); return; }
+      if (choice === "close") return "close";
     }
+    if (isStale(gen)) return "stale";
 
-    await waitForCourseListReady(session.page);
-    await primePage(session.page);
+    // Ask which course to work on — but ONLY when we don't have one yet.
+    // A restart therefore keeps whatever was chosen earlier instead of falling
+    // back to a default, which is what used to bounce recovery onto the wrong
+    // course. Pass --url=... (or set DIKSHA_COURSE_URL) to skip this; pass
+    // --pick to force it.
+    if (!cfg.COURSE_URL) {
+      const pick = await chooseCourse(session.page, {
+        title: "Which course do you want to work on?",
+      });
+      if (pick.action === "close") return "close";
+      cfg.setCourseUrl(pick.url);
+      log("info", "COURSE", `Working on: ${pick.title}`);
+      log("info", "COURSE", cfg.COURSE_URL);
+    }
+    if (isStale(gen)) return "stale";
+
+    await returnToCourseList(session);
     await syncCompletedFromDom(session.page, state);
     saveProgress(state);
 
-    const result = await runLoop(session, state);
+    const result = await runLoop(session, state, gen);
+    session.lastResult = result;
 
-    if (result.closeRequested) {
-      await shutdown("user chose close", 0);
-      return;
-    }
+    if (result.stale) return "stale";
+    if (result.closeRequested) return "close";
 
     log("info", "DONE",
       `completed=${result.completedThisRun} failed=${result.failedThisRun} known=${state.completed.size} ` +
@@ -302,9 +361,38 @@ async function runLoop(session, state) {
       log("warn", "DONE", `Failed keys: ${[...state.failed.keys()].join(", ")}`);
     }
     saveProgress(state);
-    await browser.close().catch(() => {});
-    process.exit(result.failedThisRun > 0 ? 1 : 0);
+    return "done";
   }
 
-  await main();
+  // Top-level driver. A restart is a fresh iteration of this loop rather than a
+  // recursive main() call, so stack frames don't nest and only one runLoop is
+  // ever live (older ones bail on the generation check).
+  while (true) {
+    const gen = ++generation;
+    let resolveRestart;
+    const restarted = new Promise((r) => { resolveRestart = r; });
+    signalRestart = () => resolveRestart("restart");
+
+    const outcome = await Promise.race([
+      main(gen).catch(async (err) => {
+        log("error", "LOOP", `Run stopped: ${err && (err.stack || err.message)}`);
+        const choice = await resolveTrouble(
+          "The automation loop stopped with an error",
+          (err && err.message) || String(err),
+          "The browser is left open as-is. Continue when you're ready."
+        );
+        return choice === "close" ? "close" : "restart";
+      }),
+      restarted,
+    ]);
+
+    if (outcome === "restart" || outcome === "stale") continue;
+    if (outcome === "close") { await shutdown("user chose close", 0); return; }
+    break; // "done"
+  }
+
+  const result = session.lastResult || { completedThisRun: 0, failedThisRun: 0 };
+  saveProgress(state);
+  await browser.close().catch(() => {});
+  process.exit(result.failedThisRun > 0 ? 1 : 0);
 })();
