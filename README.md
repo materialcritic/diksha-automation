@@ -30,7 +30,7 @@ resumable, on-disk progress record.
   excluded), skipping anything locked (DIKSHA marks not-yet-available items
   with a `view-disabled-btn` class rather than a native `disabled` attribute)
   or already complete per the DOM check above.
-- **Plays videos.** Mutes the video, sets its playback rate (default `1.0`,
+- **Plays videos.** Mutes the video, sets its playback rate (default `1.5`,
   configurable), and waits for it to end — polling actual video state
   (`ended`, `currentTime`/`duration`, `error`, stalls), not a fixed sleep.
 - **Reads PDFs.** DIKSHA serves PDF readings/PPTs through a bundled Mozilla
@@ -42,14 +42,18 @@ resumable, on-disk progress record.
   persisted to `.local/progress.json` as a secondary record; DIKSHA's own DOM
   state is the primary source of truth for "already done."
 
-## Why default speed is 1.0x, not faster
+## A note on playback speed
 
-Setting `video.playbackRate` client-side is not guaranteed to be honored by
-every player, and many LMS platforms validate progress against wall-clock
-heartbeats rather than `video.currentTime`. If your course doesn't record
-progress, the most likely cause is a mismatch between playback rate and how
-the server validates watch time — try `DIKSHA_SPEED=1.0` (the default) before
-assuming anything else is broken.
+The default is `1.5`. Setting `video.playbackRate` client-side did hold in
+live testing against DIKSHA (confirmed: no player reset it back), so there's
+no known mechanical reason it wouldn't work. That said, if a module's DOM
+completion percentage plateaus below 100% (see `[PROGRESS] Settled at N%` in
+the log) after trying at higher-than-1x speeds, that's a real, observed
+failure mode on this platform — likely DIKSHA's own tracking discounting
+watched time against how much real time actually elapsed, though the exact
+mechanism hasn't been confirmed by reading its source. If a module keeps
+plateauing, try `DIKSHA_SPEED=1.0` for that course before assuming something
+else is broken.
 
 ## Prerequisites
 
@@ -140,11 +144,32 @@ DIKSHA_SPEED=1.0 DIKSHA_LOG_LEVEL=debug node diksha-progress-monitor.js --url="h
      overlay) and wait for navigation — or for a new tab, if the control
      opens one.
    - If nothing is found: return to the course list once, and if a second
-     consecutive pass still finds nothing, the run ends — that's the actual
-     "no more content" signal, not an iteration counter running out.
-4. **Shutdown** — `Ctrl+C`, an unhandled rejection, or an uncaught exception
-   all trigger the same path: save progress to disk, close the browser
-   (5s timeout), exit with a signal-appropriate code.
+     consecutive pass still finds nothing, that's the "no more content"
+     signal — see step 4 below for what happens next.
+4. **When something the app can't resolve on its own comes up**, it stops and
+   asks instead of quitting the browser on its own. This covers: Chrome
+   failing to launch, login not detected within the wait window, no content
+   found after repeated scans, and a module failing all `MAX_RETRIES_PER_MODULE`
+   attempts (which used to mean it was silently abandoned forever). You get
+   three options in the terminal:
+   - **Close the app** — saves progress, closes the browser, exits.
+   - **Take over manually** — the browser stays open exactly as-is; do
+     whatever's needed (log in, finish a module by hand, close a stuck
+     dialog), then press Enter in the terminal to see the same menu again.
+   - **Retry** — for a launch/login/idle situation, tries that step again;
+     for a module that exhausted its retries, gives it a fresh retry budget
+     and picks it back up.
+   `Ctrl+C` is the one thing that still closes immediately — that's treated
+   as an explicit "stop now," not an error the app needs to ask about.
+
+## Shutdown
+
+`Ctrl+C` saves progress and closes the browser immediately (5s timeout on the
+close itself). An unhandled rejection or uncaught exception instead goes
+through the same choice menu described above (title: "The app hit an
+unexpected error") — the browser is left open and, if you choose Retry, the
+automation loop restarts from the course list using the same browser and
+profile, not a fresh launch.
 
 ## Files
 
@@ -158,6 +183,7 @@ DIKSHA_SPEED=1.0 DIKSHA_LOG_LEVEL=debug node diksha-progress-monitor.js --url="h
 | `lib/video.js` | video detection, playback, completion polling |
 | `lib/pdf.js` | PDF.js viewer detection, page-by-page scroll polling |
 | `lib/progress.js` | load/save `.local/progress.json` |
+| `lib/prompt.js` | the close/take-over/retry terminal menu |
 | `.local/` | gitignored — profile, progress file, diagnostic reports |
 
 ## Troubleshooting

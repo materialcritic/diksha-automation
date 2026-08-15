@@ -60,6 +60,13 @@ module.exports = {
   // PDFs do navigate, but land well within this window.
   CLICK_NAV_TIMEOUT_MS: 6000,
   SETTLE_MS: 1000,
+  // Wait after a video/PDF ends, before navigating back to the course list.
+  // Navigating away (page.goto) aborts any in-flight request on the current
+  // page — if DIKSHA's "mark complete" call fires asynchronously right as
+  // the content ends and takes longer than this to land, leaving too soon
+  // kills it mid-flight. Observed live: completion plateaued at 97% with a
+  // 3s wait; DIKSHA_POST_CONTENT_SETTLE_MS lets this be tuned per course.
+  POST_CONTENT_SETTLE_MS: Number(process.env.DIKSHA_POST_CONTENT_SETTLE_MS || 20000),
   LOGIN_WAIT_MS: 300000,
   VIDEO_STALL_MS: 60000,
   VIDEO_MAX_MS: 3 * 60 * 60 * 1000,

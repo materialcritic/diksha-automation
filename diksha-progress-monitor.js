@@ -8,6 +8,7 @@ const {
 const { findVideo, configureAndPlay, waitForVideoEnd } = require("./lib/video");
 const { findPdfViewer, readPdf } = require("./lib/pdf");
 const { loadProgress, saveProgress } = require("./lib/progress");
+const { resolveTrouble } = require("./lib/prompt");
 
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -56,23 +57,33 @@ async function returnToCourseList(session) {
   await primePage(session.page);
 }
 
-(async () => {
-  const { browser, page } = await launch();
-  const state = loadProgress();
-  const session = {
-    browser, page, rootPage: page, popup: null,
-    saveProgress: () => saveProgress(state),
-  };
-  installShutdown(session);
-
-  await page.goto(cfg.COURSE_URL, { waitUntil: "domcontentloaded", timeout: cfg.NAV_TIMEOUT_MS });
-  if (!(await ensureLoggedIn(page))) process.exit(2);
-  await waitForCourseListReady(page);
-  await primePage(page);
-  await syncCompletedFromDom(page, state);
+// Records a failure for `key` and, if that was its last retry, asks the user
+// what to do instead of letting it be silently abandoned forever. Returns
+// true if the caller should stop trying this key for now (either it's still
+// within budget and should just move on, or the user chose to close/retry
+// and the caller's loop will handle that separately) — false if the user
+// reset the budget and this key should be treated as immediately retryable.
+async function recordFailure(session, state, key, reason) {
+  const count = (state.failed.get(key) || 0) + 1;
+  state.failed.set(key, count);
   saveProgress(state);
+  if (count < cfg.MAX_RETRIES_PER_MODULE) return "exhausted-budget-remaining";
 
+  const choice = await resolveTrouble(
+    `Module ${key} failed ${count} time(s)`,
+    `Reason: ${reason}\nThis module would normally be permanently skipped now.`,
+    `The browser is open on module ${key}. Fix whatever's needed (e.g. finish it manually), then continue.`
+  );
+  if (choice === "close") return "close";
+  // retry: give it a fresh budget so findClickable will pick it up again.
+  state.failed.delete(key);
+  saveProgress(state);
+  return "retry";
+}
+
+async function runLoop(session, state) {
   let completedThisRun = 0, failedThisRun = 0, idlePasses = 0;
+  session.currentKey = null; // avoid misattributing progress to a stale key after a restart
 
   while (completedThisRun + failedThisRun < cfg.MAX_MODULES) {
     const video = await findVideo(session.page);
@@ -85,7 +96,7 @@ async function returnToCourseList(session) {
       await video.handle.dispose().catch(() => {});
       log("info", "VIDEO", `Outcome: ${outcome}`);
 
-      await delay(3000); // let DIKSHA's backend register the event before we navigate away
+      await delay(cfg.POST_CONTENT_SETTLE_MS);
       await returnToCourseList(session);
       await syncCompletedFromDom(session.page, state);
 
@@ -94,15 +105,17 @@ async function returnToCourseList(session) {
         if (settled.completed) {
           state.completed.add(key);
           completedThisRun++;
+          saveProgress(state);
         } else {
-          state.failed.set(key, (state.failed.get(key) || 0) + 1);
+          const decision = await recordFailure(session, state, key, `video ended but only reached ${settled.percent ?? "?"}% on DIKSHA`);
+          if (decision === "close") return { completedThisRun, failedThisRun, closeRequested: true };
           failedThisRun++;
         }
       } else if (key) {
-        state.failed.set(key, (state.failed.get(key) || 0) + 1);
+        const decision = await recordFailure(session, state, key, `video outcome: ${outcome}`);
+        if (decision === "close") return { completedThisRun, failedThisRun, closeRequested: true };
         failedThisRun++;
       }
-      saveProgress(state);
       session.currentKey = null;
       continue;
     }
@@ -114,7 +127,7 @@ async function returnToCourseList(session) {
       const outcome = await readPdf(pdf);
       log("info", "PDF", `Outcome: ${outcome}`);
 
-      await delay(3000);
+      await delay(cfg.POST_CONTENT_SETTLE_MS);
       await returnToCourseList(session);
       await syncCompletedFromDom(session.page, state);
 
@@ -123,15 +136,17 @@ async function returnToCourseList(session) {
         if (settled.completed) {
           state.completed.add(key);
           completedThisRun++;
+          saveProgress(state);
         } else {
-          state.failed.set(key, (state.failed.get(key) || 0) + 1);
+          const decision = await recordFailure(session, state, key, `PDF finished but only reached ${settled.percent ?? "?"}% on DIKSHA`);
+          if (decision === "close") return { completedThisRun, failedThisRun, closeRequested: true };
           failedThisRun++;
         }
       } else if (key) {
-        state.failed.set(key, (state.failed.get(key) || 0) + 1);
+        const decision = await recordFailure(session, state, key, `PDF outcome: ${outcome}`);
+        if (decision === "close") return { completedThisRun, failedThisRun, closeRequested: true };
         failedThisRun++;
       }
-      saveProgress(state);
       session.currentKey = null;
       continue;
     }
@@ -145,31 +160,109 @@ async function returnToCourseList(session) {
         await clickAndSettle(session, candidate.frame, candidate.element);
       } catch (err) {
         log("error", "MODULE", `Click failed: ${err.message}`);
-        state.failed.set(candidate.key, (state.failed.get(candidate.key) || 0) + 1);
-        failedThisRun++;
+        const decision = await recordFailure(session, state, candidate.key, `click failed: ${err.message}`);
         session.currentKey = null;
-        await returnToCourseList(session);
-      } finally {
         await candidate.element.dispose().catch(() => {});
+        await returnToCourseList(session);
+        if (decision === "close") return { completedThisRun, failedThisRun, closeRequested: true };
+        failedThisRun++;
+        continue;
       }
+      await candidate.element.dispose().catch(() => {});
       continue;
     }
 
     idlePasses++;
     if (idlePasses === 1) { await returnToCourseList(session); continue; }
-    if (idlePasses >= cfg.MAX_IDLE_PASSES) break;
-    log("debug", "IDLE", `No content found (pass ${idlePasses}/${cfg.MAX_IDLE_PASSES}).`);
-    await delay(2000);
+    if (idlePasses < cfg.MAX_IDLE_PASSES) {
+      log("debug", "IDLE", `No content found (pass ${idlePasses}/${cfg.MAX_IDLE_PASSES}).`);
+      await delay(2000);
+      continue;
+    }
+
+    const choice = await resolveTrouble(
+      "No content found",
+      `Scanned the course list ${cfg.MAX_IDLE_PASSES} times with nothing to do — no video, no PDF, no unvisited module. This usually means the course is actually finished, but could also mean something on the page isn't being recognized.`,
+      "The browser is open on the course list. Look around, and continue when you're ready."
+    );
+    if (choice === "close") return { completedThisRun, failedThisRun, closeRequested: true };
+    idlePasses = 0;
+    await returnToCourseList(session);
   }
 
-  const exhausted = completedThisRun + failedThisRun >= cfg.MAX_MODULES;
-  log("info", "DONE",
-    `completed=${completedThisRun} failed=${failedThisRun} known=${state.completed.size} ` +
-    (exhausted ? "(module budget exhausted)" : "(no remaining content found)"));
-  if (state.failed.size) {
-    log("warn", "DONE", `Failed keys: ${[...state.failed.keys()].join(", ")}`);
+  return { completedThisRun, failedThisRun, closeRequested: false, exhausted: true };
+}
+
+(async () => {
+  let browser, page;
+  while (true) {
+    try {
+      ({ browser, page } = await launch());
+      break;
+    } catch (err) {
+      log("error", "LAUNCH", err.message);
+      const choice = await resolveTrouble(
+        "Could not launch Chrome",
+        err.message,
+        "Fix whatever's blocking the launch (e.g. close other Chrome windows using this profile), then continue."
+      );
+      if (choice === "close") process.exit(1);
+    }
   }
-  saveProgress(state);
-  await browser.close().catch(() => {});
-  process.exit(exhausted || failedThisRun > 0 ? 1 : 0);
+
+  const state = loadProgress();
+  const session = {
+    browser, page, rootPage: page, popup: null,
+    saveProgress: () => saveProgress(state),
+  };
+
+  const shutdown = installShutdown(session, {
+    onFatal: async (label, err) => {
+      const choice = await resolveTrouble(
+        "The app hit an unexpected error",
+        `${label}: ${err && err.message}`,
+        "The browser is left open as-is. Continue when you're ready."
+      );
+      if (choice === "close") { await shutdown(`user chose close after ${label}`, 1); return; }
+      log("info", "RECOVER", "Restarting the automation loop.");
+      await main();
+    },
+  });
+
+  async function main() {
+    await page.goto(cfg.COURSE_URL, { waitUntil: "domcontentloaded", timeout: cfg.NAV_TIMEOUT_MS });
+
+    while (!(await ensureLoggedIn(session.page))) {
+      const choice = await resolveTrouble(
+        "Not signed in",
+        "Didn't detect a successful login within the wait window.",
+        "Log in in the browser window, then continue."
+      );
+      if (choice === "close") { await shutdown("user chose close (not logged in)", 2); return; }
+    }
+
+    await waitForCourseListReady(session.page);
+    await primePage(session.page);
+    await syncCompletedFromDom(session.page, state);
+    saveProgress(state);
+
+    const result = await runLoop(session, state);
+
+    if (result.closeRequested) {
+      await shutdown("user chose close", 0);
+      return;
+    }
+
+    log("info", "DONE",
+      `completed=${result.completedThisRun} failed=${result.failedThisRun} known=${state.completed.size} ` +
+      (result.exhausted ? "(module budget exhausted)" : ""));
+    if (state.failed.size) {
+      log("warn", "DONE", `Failed keys: ${[...state.failed.keys()].join(", ")}`);
+    }
+    saveProgress(state);
+    await browser.close().catch(() => {});
+    process.exit(result.failedThisRun > 0 ? 1 : 0);
+  }
+
+  await main();
 })();
