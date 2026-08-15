@@ -49,7 +49,7 @@ module.exports = {
   REPORT_TXT: path.join(LOCAL_DIR, "diksha-diagnostic.txt"),
   REPORT_JSON: path.join(LOCAL_DIR, "diksha-diagnostic.json"),
 
-  PLAYBACK_RATE: Number(process.env.DIKSHA_SPEED || 1.5),
+  PLAYBACK_RATE: Number(process.env.DIKSHA_SPEED || 5.0),
 
   LOG_LEVEL: process.env.DIKSHA_LOG_LEVEL || "info",
 

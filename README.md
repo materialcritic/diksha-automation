@@ -30,7 +30,7 @@ resumable, on-disk progress record.
   excluded), skipping anything locked (DIKSHA marks not-yet-available items
   with a `view-disabled-btn` class rather than a native `disabled` attribute)
   or already complete per the DOM check above.
-- **Plays videos.** Mutes the video, sets its playback rate (default `1.5`,
+- **Plays videos.** Mutes the video, sets its playback rate (default `5.0`,
   configurable), and waits for it to end — polling actual video state
   (`ended`, `currentTime`/`duration`, `error`, stalls), not a fixed sleep.
 - **Reads PDFs.** DIKSHA serves PDF readings/PPTs through a bundled Mozilla
@@ -44,16 +44,22 @@ resumable, on-disk progress record.
 
 ## A note on playback speed
 
-The default is `1.5`. Setting `video.playbackRate` client-side did hold in
+The default is `5.0`. Setting `video.playbackRate` client-side does hold in
 live testing against DIKSHA (confirmed: no player reset it back), so there's
-no known mechanical reason it wouldn't work. That said, if a module's DOM
-completion percentage plateaus below 100% (see `[PROGRESS] Settled at N%` in
-the log) after trying at higher-than-1x speeds, that's a real, observed
-failure mode on this platform — likely DIKSHA's own tracking discounting
-watched time against how much real time actually elapsed, though the exact
-mechanism hasn't been confirmed by reading its source. If a module keeps
-plateauing, try `DIKSHA_SPEED=1.0` for that course before assuming something
-else is broken.
+no known mechanical reason it wouldn't work.
+
+However, at 5x there's a **confirmed, repeatable failure mode**: two
+different videos both plateaued at exactly 97% DOM-reported completion,
+never reaching 100%, and neither retrying nor waiting an extra 20s after the
+video ended changed the outcome (see `[PROGRESS] Settled at N%` in the log).
+The exact mechanism isn't confirmed — DIKSHA's client-side JS hasn't been
+read — but the consistent, identical percentage across different videos
+points to something in its own tracking discounting watched time against how
+much real time actually elapsed, not a timing race in this script. Modules
+that hit `MAX_RETRIES_PER_MODULE` failures this way will now surface the
+close/take-over/retry prompt (see "How it works" below) rather than being
+silently abandoned. If a module keeps plateauing, try a lower `DIKSHA_SPEED`
+(1.5 has completed cleanly in testing) for that course.
 
 ## Prerequisites
 
