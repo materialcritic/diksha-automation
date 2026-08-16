@@ -303,10 +303,15 @@ bundled Mozilla PDF.js viewer (`window.PDFViewerApplication` +
 `findPdfViewer()` (`lib/pdf.js`) won't recognize it — run `npm run diagnose`
 while that content is open to see what's actually there.
 
-**"Profile is locked" on launch.** Another Chrome process is using
-`.local/diksha-profile`. Close all Chrome windows using that profile, or
-delete `.local/diksha-profile/SingletonLock` if you're sure nothing is using
-it.
+**"Profile is in use by PID N" on launch.** This means another instance is
+*actually still running* — confirmed by checking that PID is alive, not
+guessed. Stop it first (`kill N`) rather than deleting the lock file: doing
+that while the original process is still alive just lets a second instance
+start alongside it, silently, with no error — which is exactly how three
+copies of this script ended up running concurrently for two hours, each
+pegging a CPU core, before this check existed. If the lock is genuinely
+stale (the PID it names isn't running), `launch()` detects and clears it on
+its own — you should never need to delete `SingletonLock` by hand anymore.
 
 **Logged out and the script isn't prompting.** It should detect this via URL
 pattern or a password field and print a prompt with a 5-minute wait. If it
